@@ -1,3 +1,13 @@
+import os
+
+from config import DATABASE_URL, COLLECTION_NAME, EMBEDDING_MODEL, LLM_MODEL
+
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_postgres import PGVector
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+
+# --- Prompt Template (conforme spec.md) ---
 PROMPT_TEMPLATE = """
 CONTEXTO:
 {contexto}
@@ -25,5 +35,60 @@ PERGUNTA DO USUÁRIO:
 RESPONDA A "PERGUNTA DO USUÁRIO"
 """
 
-def search_prompt(question=None):
-    pass
+
+def _get_vector_store() -> PGVector:
+    """Instancia e retorna o PGVector conectado ao banco."""
+    embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
+    vector_store = PGVector(
+        embeddings=embeddings,
+        collection_name=COLLECTION_NAME,
+        connection=DATABASE_URL,
+        use_jsonb=True,
+    )
+    return vector_store
+
+
+def search_prompt():
+    """
+    Retorna um dicionário com os componentes necessários para o chat:
+    - 'chain': LCEL chain (prompt | llm | StrOutputParser)
+    - 'buscar_contexto': função de busca vetorial
+
+    Retorna None se houver erro de configuração.
+    """
+    if not DATABASE_URL:
+        print("ERRO: DATABASE_URL não configurada no .env")
+        return None
+
+    # Inicializa o vector store UMA VEZ
+    try:
+        vector_store = _get_vector_store()
+    except Exception as e:
+        print(f"ERRO ao inicializar embeddings ou conexão com banco: {e}")
+        return None
+
+    def buscar_contexto(query: str, k: int = 10) -> str:
+        """
+        Busca os k documentos mais similares à query no banco vetorial.
+        Retorna os textos concatenados como uma string única.
+        """
+        resultados = vector_store.similarity_search_with_score(query, k=k)
+        textos = [doc.page_content for doc, _score in resultados]
+        return "\n\n".join(textos)
+
+    llm = ChatGoogleGenerativeAI(
+        model=LLM_MODEL,
+        temperature=0,
+    )
+
+    prompt = PromptTemplate(
+        input_variables=["contexto", "pergunta"],
+        template=PROMPT_TEMPLATE,
+    )
+
+    chain = prompt | llm | StrOutputParser()
+
+    return {
+        "chain": chain,
+        "buscar_contexto": buscar_contexto,
+    }
